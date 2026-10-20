@@ -1,4 +1,5 @@
 import axios from "axios";
+import { MILIA_VERSION } from "../version";
 import { TextChannel, Client, MessageEmbed } from "discord.js";
 import * as cheerio from "cheerio";
 
@@ -9,7 +10,7 @@ export async function startFleetPingWatcher(discordClient: Client, channelId: st
     try {
       const { data } = await axios.get("https://wl.tlaincursions.com/waitlist?wl=1", {
         headers: {
-          "User-Agent": "M.I.L.I.A. Fleet Watcher Bot",
+          "User-Agent": `M.I.L.I.A. Fleet Watcher Bot/${MILIA_VERSION}`,
         },
       });
 
@@ -30,7 +31,7 @@ export async function startFleetPingWatcher(discordClient: Client, channelId: st
             .setDescription("A new fleet is available for capsuleers. Prepare your ships and join the waitlist.")
             .setColor("#00b0f4")
             .addField("🔗 Waitlist Link", "[Join Now](https://wl.tlaincursions.com/waitlist?wl=1)", false)
-            .setFooter({ text: "M.I.L.I.A. Automated Fleet Monitor" })
+            .setFooter({ text: `M.I.L.I.A. v${MILIA_VERSION} · Automated Fleet Monitor` })
             .setTimestamp();
 
           await channel.send({ content: "@everyone", embeds: [embed] });

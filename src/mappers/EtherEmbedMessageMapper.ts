@@ -7,6 +7,7 @@
 // -------------------------------------------------------------
 
 import { EmbedFieldData, MessageEmbed }    from "discord.js";
+import { MILIA_NAME } from "../version";
 
 import ESIIncursionState                   from "../models/esi/ESIIncursionState";
 import IncursionsCacheEntry                from "../models/bot/IncursionsCacheEntry";
@@ -83,7 +84,7 @@ export default class EmbedMessageMapper {
       .setDescription("CONCORD patrols report no hostile Sansha fleets in high-security space.")
       .setColor(EmbedMessageMapper.COLOR.purple)
       .addFields([spawnField])
-      .setFooter({ text: `🤖 Malaya Interstellar Integrated Assistant 🕐 ${EmbedMessageMapper.eveTime(now)}` });
+      .setFooter({ text: `🤖 ${MILIA_NAME} 🕐 ${EmbedMessageMapper.eveTime(now)}` });
   }
 
   /* ──────────────────────── Incursion embed ────────────────────────── */
@@ -226,7 +227,7 @@ export default class EmbedMessageMapper {
     );
 
     embed.addFields(fields);
-    embed.setFooter({ text: `🤖 Malaya Interstellar Integrated Assistant 🕐 ${EmbedMessageMapper.eveTime(now)}` });
+    embed.setFooter({ text: `🤖 ${MILIA_NAME} 🕐 ${EmbedMessageMapper.eveTime(now)}` });
     return embed;
   }
 }
