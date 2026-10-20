@@ -131,7 +131,7 @@ yarn run bot      # start the bot
 
 - **[Olivier Pelletier](https://github.com/OlivierPelletier)**: the original [eve-online-incursions-discord-bot](https://github.com/OlivierPelletier/eve-online-incursions-discord-bot) (MIT), and its sponsor Kevin "Twiggys" T.
 - Incursion and universe data from **EVE Online's ESI**, by CCP Games.
-- Fork maintained by **BajuBesi Labs**, with the help of an AI assistant. Released under the [MIT licence](LICENSE); Olivier's copyright notice is kept.
+- Fork maintained by **BajuBesi Labs**. Released under the [MIT licence](LICENSE); Olivier's copyright notice is kept.
 
 ## CCP Copyright Notice
 
