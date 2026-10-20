@@ -1,244 +1,228 @@
+// src/controllers/BotController.ts
+/* eslint-disable @typescript-eslint/no-non-null-assertion */
+
 import { CommandInteraction, Message, TextChannel } from "discord.js";
 import { EmbedBuilder } from "@discordjs/builders";
-import ESIService from "../services/ESIService";
-import IncursionInfo from "../models/bot/IncursionInfo";
+
+import ESIService             from "../services/ESIService";
 import IncursionLayoutService from "../services/IncursionLayoutService";
-import RegionIconService from "../services/RegionIconService";
-import IncursionsCacheEntry from "../models/bot/IncursionsCacheEntry";
+import RegionIconService      from "../services/RegionIconService";
+import IncursionInfoService   from "../services/IncursionInfoService";
 import IncursionsCacheService from "../services/IncursionsCacheService";
-import IncursionInfoService from "../services/IncursionInfoService";
-import EmbedMessageMapper from "../mappers/EmbedMessageMapper";
+
+import IncursionsCacheEntry   from "../models/bot/IncursionsCacheEntry";
+import IncursionInfo          from "../models/bot/IncursionInfo";
+import EmbedMessageMapper     from "../mappers/EmbedMessageMapper";
 
 class BotController {
-  private readonly channel: TextChannel;
+  /* ───────── channels & helpers ───────── */
+  private readonly highSecChannel: TextChannel;
+  private readonly nullSecChannel: TextChannel;
 
-  private readonly embedMessageMapper: EmbedMessageMapper;
+  private readonly mapper   = new EmbedMessageMapper();
+  private readonly esi      = new ESIService();
+  private readonly layouts  = new IncursionLayoutService();
+  private readonly icons    = new RegionIconService();
+  private readonly cache    = new IncursionsCacheService();
+  private readonly infoSvc  = new IncursionInfoService(this.esi, this.icons, this.layouts);
 
-  private readonly esiService: ESIService;
+  private incursionLoopId?: NodeJS.Timeout;
 
-  private readonly incursionLayoutService: IncursionLayoutService;
-
-  private readonly regionIconService: RegionIconService;
-
-  private readonly incursionsCacheService: IncursionsCacheService;
-
-  private readonly incursionsInfoService: IncursionInfoService;
-
-  private incursionLoopId: NodeJS.Timeout | undefined;
-
-  constructor(_channel: TextChannel) {
-    this.channel = _channel;
-    this.embedMessageMapper = new EmbedMessageMapper();
-    this.esiService = new ESIService();
-    this.incursionLayoutService = new IncursionLayoutService();
-    this.regionIconService = new RegionIconService();
-    this.incursionsCacheService = new IncursionsCacheService();
-    this.incursionsInfoService = new IncursionInfoService(
-      this.esiService,
-      this.regionIconService,
-      this.incursionLayoutService
-    );
-    this.startIncursionLoop(1000);
+  constructor(highSec: TextChannel, nullSec: TextChannel) {
+    this.highSecChannel = highSec;
+    this.nullSecChannel = nullSec;
+    this.startIncursionLoop(1_000);                  // first run in 1 s
   }
 
-  private startIncursionLoop(nextRefreshInMs: number) {
-    this.incursionLoopId = setTimeout(
-      async () => {
-        let nextRefreshMs = 10000;
-        try {
-          await this.loopIncursions();
-          const now = Date.now();
-          const expiresAt = this.incursionsInfoService
-            .getEsiIncursionCacheExpireDate()
-            .getTime();
-          nextRefreshMs = expiresAt - now;
-          console.log(
-            `Next incursions refresh in ${nextRefreshMs / 1000} seconds`
-          );
-        } catch (err) {
-          console.error(
-            "An error occured while executing the incursion info loop. Retrying in 10 seconds..."
-          );
-        }
-        this.startIncursionLoop(nextRefreshMs);
-      },
-      nextRefreshInMs < 1000 ? 1000 : nextRefreshInMs
-    );
+  /* ───────── small helpers ───────── */
+  private isLowSecOrUnknown(sec: number | null | undefined): boolean {
+    return sec == null || (sec < 0.5 && sec > 0.0);
   }
 
-  private stopIncursionLoop() {
-    clearTimeout(this.incursionLoopId);
-  }
-
-  async loopIncursions() {
-    const incursionInfos: IncursionsCacheEntry[] | null =
-      await this.incursions();
-
-    if (incursionInfos == null) {
-      return;
-    }
-
-    const promiseList: Promise<Message | void>[] = [];
-
-    if (incursionInfos.length > 0) {
-      this.incursionsCacheService.clearNoIncursionMessageId();
-      this.updateCurrentIncursionInfosWithCache(incursionInfos);
-
-      incursionInfos.forEach((incursionInfo, incursionInfoIndex) => {
-        const embedMessage =
-          this.embedMessageMapper.incursionInfoToEmbedMessage(incursionInfo);
-
-        if (this.channel != null) {
-          promiseList.push(
-            this.channel.messages
-              .fetch(incursionInfo.messageId)
-              .then(async (message) => {
-                await message.edit({ content: null, embeds: [embedMessage] });
-              })
-              .catch(async () => {
-                await this.channel
-                  .send({
-                    content: `@everyone New spawn detected in ${incursionInfo.incursionInfo.constellationName}!`,
-                    embeds: [embedMessage],
-                  })
-                  .then((message) => {
-                    incursionInfos[incursionInfoIndex].messageId = message.id;
-                  });
-              })
-          );
-        }
-      });
-    } else if (incursionInfos.length === 0) {
-      const embedMessage = this.embedMessageMapper.noIncursionToEmbedMessage(
-        this.incursionsCacheService.findLastIncursion()
-      );
-      if (this.channel != null) {
-        const noIncursionMessageId =
-          this.incursionsCacheService.findNoIncursionMessageId();
-
-        if (noIncursionMessageId != null) {
-          promiseList.push(
-            this.channel.messages
-              .fetch(noIncursionMessageId)
-              .then(async (message) => {
-                await message.edit({ embeds: [embedMessage] });
-              })
-              .catch(async () => {
-                await this.channel
-                  .send({ embeds: [embedMessage] })
-                  .then((message) => {
-                    this.incursionsCacheService.saveNoIncursionMessageId(
-                      message.id
-                    );
-                  });
-              })
-          );
-        } else {
-          promiseList.push(
-            this.channel.send({ embeds: [embedMessage] }).then((message) => {
-              this.incursionsCacheService.saveNoIncursionMessageId(message.id);
-            })
-          );
-        }
+  /* ───────── scheduler ───────── */
+  private startIncursionLoop(delayMs: number) {
+    this.incursionLoopId = setTimeout(async () => {
+      let next = 10_000;
+      try {
+        await this.loopIncursions();
+        next =
+          this.infoSvc.getEsiIncursionCacheExpireDate().getTime() - Date.now();
+        console.log(`⏱️  Next refresh in ${(next / 1_000).toFixed(0)} s`);
+      } catch (err) {
+        console.error("Loop error – retrying in 10 s:", err);
       }
-    }
-
-    await Promise.all(promiseList);
-
-    this.incursionsCacheService.checkAndRotateCurrentIncursions(incursionInfos);
+      this.startIncursionLoop(Math.max(1_000, next));
+    }, delayMs);
   }
 
-  async commandIncursions(interaction: CommandInteraction) {
-    const loadingEmbed = new EmbedBuilder().setDescription(
-      "Retrieving incursions informations..."
-    ).data;
-    await interaction.reply({ embeds: [loadingEmbed] });
-    const incursionInfos: IncursionsCacheEntry[] | null =
-      await this.incursions();
+  /* ───────── MAIN LOOP ───────── */
+  private async loopIncursions() {
+    const incursions = await this.fetchIncursions();
+    if (!incursions) return;
 
-    const promiseList: Promise<Message>[] = [];
+    const active = incursions.filter(
+      (e) => !this.isLowSecOrUnknown(e.incursionInfo.headquarterSystemSecurity)
+    );
 
-    if (incursionInfos != null && incursionInfos.length > 0) {
-      this.updateCurrentIncursionInfosWithCache(incursionInfos);
+    const jobs: Promise<Message | void>[] = [];
 
-      incursionInfos.forEach((incursionInfo) => {
-        const embedMessage =
-          this.embedMessageMapper.incursionInfoToEmbedMessage(incursionInfo);
+    if (active.length) {
+      this.cache.clearNoIncursionMessageId();
+      this.mergeWithCache(active);
 
-        if (interaction.channel != null) {
-          promiseList.push(
-            interaction.channel.send({ embeds: [embedMessage] })
-          );
-        }
-      });
+      for (const [idx, entry] of active.entries()) {
+        const embed   = await this.mapper.incursionInfoToEmbedMessage(entry);
+        const channel =
+          entry.incursionInfo.headquarterSystemSecurity! <= 0
+            ? this.nullSecChannel
+            : this.highSecChannel;
+
+        jobs.push(
+          channel.messages
+            .fetch(entry.messageId)
+            .then((m) => m.edit({ content: null, embeds: [embed] }))
+            .catch(() =>
+              channel
+                .send({
+                  content: `@everyone New spawn in ${entry.incursionInfo.constellationName}!`,
+                  embeds : [embed],
+                })
+                .then((m) => {
+                  active[idx].messageId = m.id;
+                })
+            )
+        );
+      }
     } else {
-      const embedMessage = this.embedMessageMapper.noIncursionToEmbedMessage(
-        this.incursionsCacheService.findLastIncursion()
+      /* show / update “no incursions” banner */
+      const embed = this.mapper.noIncursionToEmbedMessage(
+        this.cache.findLastIncursion(false)          // last *high-sec* HQ
       );
-      if (interaction.channel != null) {
-        promiseList.push(interaction.channel.send({ embeds: [embedMessage] }));
-      }
+
+      const id = this.cache.findNoIncursionMessageId();
+      jobs.push(
+        id
+          ? this.highSecChannel.messages
+              .fetch(id)
+              .then((m) => m.edit({ embeds: [embed] }))
+              .catch(() =>
+                this.highSecChannel
+                  .send({ embeds: [embed] })
+                  .then((m) => this.cache.saveNoIncursionMessageId(m.id))
+              )
+          : this.highSecChannel
+              .send({ embeds: [embed] })
+              .then((m) => this.cache.saveNoIncursionMessageId(m.id))
+      );
     }
 
-    await Promise.all(promiseList);
+    await Promise.all(jobs);
+    this.cache.checkAndRotateCurrentIncursions(active);
+  }
 
-    if (incursionInfos != null) {
-      this.incursionsCacheService.checkAndRotateCurrentIncursions(
-        incursionInfos
-      );
+  /* ───────── slash /incursions ───────── */
+  async commandIncursions(interaction: CommandInteraction) {
+    const loading = new EmbedBuilder().setDescription("Retrieving incursions …").data;
+    await interaction.reply({ embeds: [loading] });
+
+    const incursions =
+      (await this.fetchIncursions())?.filter(
+        (e) => !this.isLowSecOrUnknown(e.incursionInfo.headquarterSystemSecurity)
+      ) ?? [];
+
+    this.mergeWithCache(incursions);
+
+    for (const entry of incursions) {
+      const embed = await this.mapper.incursionInfoToEmbedMessage(entry);
+      await interaction.channel?.send({ embeds: [embed] });
     }
 
+    if (!incursions.length) {
+      const embed = this.mapper.noIncursionToEmbedMessage(
+        this.cache.findLastIncursion(false)
+      );
+      await interaction.channel?.send({ embeds: [embed] });
+    }
+
+    this.cache.checkAndRotateCurrentIncursions(incursions);
     await interaction.deleteReply();
   }
 
-  private updateCurrentIncursionInfosWithCache(
-    incursionInfos: IncursionsCacheEntry[]
-  ) {
-    const incursionsInfoToBeModified = incursionInfos;
-
-    incursionsInfoToBeModified.forEach((incursionInfo, index) => {
-      const cachedIncursionInfo =
-        this.incursionsCacheService.findCurrentIncursionByConstellationId(
-          incursionInfo.incursionInfo.constellationId
-        );
-
-      if (cachedIncursionInfo != null) {
-        incursionsInfoToBeModified[index].createdAt =
-          cachedIncursionInfo.createdAt;
-        incursionsInfoToBeModified[index].messageId =
-          cachedIncursionInfo.messageId;
+  /* ───────── utilities ───────── */
+  private mergeWithCache(list: IncursionsCacheEntry[]) {
+    for (const [i, entry] of list.entries()) {
+      const cached = this.cache.findCurrentIncursionByConstellationId(
+        entry.incursionInfo.constellationId
+      );
+      if (cached) {
+        list[i].createdAt = cached.createdAt;
+        list[i].messageId = cached.messageId;
       }
-    });
+    }
   }
 
-  private async incursions(): Promise<IncursionsCacheEntry[] | null> {
-    const lastIncursionCache: IncursionsCacheEntry | null =
-      this.incursionsCacheService.findLastIncursion();
-    let lastIncursionInfo: IncursionInfo | null = null;
+  /* ───────── fetch & transform ───────── */
+  private async fetchIncursions(): Promise<IncursionsCacheEntry[] | null> {
+    const infos = await this.infoSvc.findAllIncursionsInfo(null);
+    if (!infos) return null;
 
-    if (lastIncursionCache != null) {
-      lastIncursionInfo = lastIncursionCache.incursionInfo;
-    }
+    const entries: IncursionsCacheEntry[] = [];
 
-    const incursionInfos: IncursionInfo[] | null =
-      await this.incursionsInfoService.findAllIncursionsInfo(lastIncursionInfo);
+    for (const info of infos) {
+      const isNull = (info.headquarterSystemSecurity ?? 0) <= 0;
+      const last   = this.cache.findLastIncursion(isNull);
 
-    if (incursionInfos == null) {
-      return null;
-    }
+      /* ---- sanitise “last” so it matches IncursionInfo type ---- */
+      let lastInfo: IncursionInfo | null = null;
+      if (last) {
+        lastInfo = {
+          ...last.incursionInfo,
+          /* ensure non-null string (type guarantee) */
+          regionIconUrl: last.incursionInfo.regionIconUrl ?? "",
+        };
+      }
 
-    const incursionCacheEntries: IncursionsCacheEntry[] = [];
+      const enriched = await this.infoSvc.buildIncursionInfoFromBase(
+        info,
+        lastInfo
+      );
 
-    incursionInfos.forEach((incursionInfo) => {
-      incursionCacheEntries.push({
-        createdAt: Date.now(),
-        updatedAt: Date.now(),
-        messageId: "",
-        incursionInfo,
+      entries.push({
+        createdAt : Date.now(),
+        updatedAt : Date.now(),
+        messageId : "",
+        incursionInfo: {
+          headquarterSystem         : enriched.headquarterSystem,
+          headquarterSystemId       : enriched.headquarterSystemId,
+          headquarterSystemSecurity : enriched.headquarterSystemSecurity ?? null,
+          stagingSystem             : enriched.stagingSystem,
+
+          constellationId   : enriched.constellationId,
+          constellationName : enriched.constellationName,
+          regionId          : enriched.regionId,
+          regionIconUrl     : enriched.regionIconUrl ?? null,
+
+          assaultSystems    : enriched.assaultSystems,
+          vanguardSystems   : enriched.vanguardSystems,
+
+          influence : enriched.influence,
+          state     : enriched.state,
+
+          isIslandConstellation      : enriched.isIslandConstellation as
+                                        "Yes" | "No" | "N/A",
+          numberOfJumpsFromLastIncursion: enriched.numberOfJumpsFromLastIncursion,
+          lastIncursionSystemName       : enriched.lastIncursionSystemName,
+
+          allianceId     : enriched.allianceId,
+          allianceName   : enriched.allianceName,
+          allianceTicker : enriched.allianceTicker,
+          allianceLogoUrl: enriched.allianceLogoUrl,
+        },
+        lastHeadquarterSystem: last?.incursionInfo.headquarterSystem,
       });
-    });
+    }
 
-    return incursionCacheEntries;
+    return entries;
   }
 }
 

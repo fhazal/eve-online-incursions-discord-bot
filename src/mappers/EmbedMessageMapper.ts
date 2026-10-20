@@ -1,142 +1,251 @@
+// src/mappers/EmbedMessageMapper.ts
+// -------------------------------------------------------------
+// • Correct alliance-logo URL sizing (“…/<id>_<size>.png”)
+// • Edencom / Triglavian route info *always* shown (None when empty)
+// • 📦 Trade-hub line hyperlinks the jump count
+// • Alliance name / ticker ALWAYS shown (cached or live)
+// • Null-sec trade-hub distance calculated only vs MJ-5F9
+// • 🪖 Fleet Info block (high-sec only)
+// • Author icon = alliance logo for null-sec HQ spawns
+// • ⛔ No right-hand thumbnail any more
+// -------------------------------------------------------------
+
 import { EmbedFieldData, MessageEmbed } from "discord.js";
-import ESIIncursionState from "../models/esi/ESIIncursionState";
-import IncursionsCacheEntry from "../models/bot/IncursionsCacheEntry";
+
+import ESIIncursionState      from "../models/esi/ESIIncursionState";
+import IncursionsCacheEntry   from "../models/bot/IncursionsCacheEntry";
+
 import { noIncursionIconUrl } from "../config/icon_urls.json";
+import { getDockUpStation }   from "../utils/getDockUpStation";
+import { getSystemIdByName }  from "../utils/getSystemIdByName";
+import { getJumpsBetweenSystems } from "../utils/getJumpsBetweenSystems";
+import { getCachedSystemSecurity } from "../utils/getCachedSystemSecurity";
+import { getSovereigntyData }      from "../utils/getSovereigntyData";
+import { getTrigEdencomSystemsInRoute } from "../utils/getTrigEdencomSystemsInRoute";
 
-class EmbedMessageMapper {
-  private readonly greenColor: number = 0x00b129;
+/* ---------- Trade-hub definitions ---------- */
+const HIGHSEC_HUBS = [
+  { name: "Jita",    systemId: 30000142 },
+  { name: "Amarr",   systemId: 30002187 },
+  { name: "Dodixie", systemId: 30002659 },
+  { name: "Hek",     systemId: 30002053 },
+  { name: "Rens",    systemId: 30002510 },
+];
+/* Sole hub for null-sec distance calculations */
+const NULLSEC_HUB  = { name: "MJ-5F9", systemId: 30002765 };
 
-  private readonly yellowColor: number = 0xff8000;
+const LOGO_SIZE = 64;                // 32 / 64 / 128 / 256
 
-  private readonly redColor: number = 0xb11500;
+export default class EmbedMessageMapper {
+/* ───────── static helpers ───────── */
+  private static readonly COLOR = {
+    green : 0x00b129,
+    yellow: 0xff8000,
+    red   : 0xb11500,
+    purple: 0x5d0085,
+  } as const;
 
-  private readonly purpleColor: number = 0x5d0085;
+  private static pad(n: number) { return n.toString().padStart(2, "0"); }
+  private static eveTime(d: Date) {
+    return (
+      `${d.getUTCFullYear()}-${this.pad(d.getUTCMonth() + 1)}-${this.pad(d.getUTCDate())}` +
+      ` at ${this.pad(d.getUTCHours())}:${this.pad(d.getUTCMinutes())} EVE Time`
+    );
+  }
 
-  noIncursionToEmbedMessage(
-    lastIncursion: IncursionsCacheEntry | null
-  ): MessageEmbed {
-    let spawnWindowField: EmbedFieldData;
+/* ───────── misc helpers ───────── */
+  private buildKundaliniTimer(created: Date, now: Date) {
+    const spawn = new Date(created.getTime() + 70 * 3_600_000);
+    const diff  = spawn.getTime() - now.getTime();
+    if (diff <= 0) return "**Kundalini Manifest is active or spawning soon**";
+    const d = Math.floor(diff / 86_400_000);
+    const h = Math.floor((diff % 86_400_000) / 3_600_000);
+    return `Kundalini Manifest in: ${d}d ${h}h – Local Time: <t:${Math.floor(spawn.getTime() / 1000)}:f>`;
+  }
+
+  private securityColor(state: string) {
+    switch (state) {
+      case ESIIncursionState.ESTABLISHED.toString():
+        return { color: EmbedMessageMapper.COLOR.green,  emoji: "🟢", label: "Combat Operations Ongoing" };
+      case ESIIncursionState.MOBILIZING.toString():
+        return { color: EmbedMessageMapper.COLOR.yellow, emoji: "🟠", label: "Fleet Mobilizing" };
+      case ESIIncursionState.WITHDRAWING.toString():
+        return { color: EmbedMessageMapper.COLOR.red,    emoji: "🔴", label: "Forces Withdrawing" };
+      default:
+        return { color: EmbedMessageMapper.COLOR.purple, emoji: "🛰️", label: state };
+    }
+  }
+
+/* ───────── “No incursion” embed ───────── */
+  noIncursionToEmbedMessage(last: IncursionsCacheEntry | null): MessageEmbed {
     const now = new Date();
+    const spawnField: EmbedFieldData = last
+      ? (() => {
+          const diff = last.updatedAt + 12 * 3_600_000 - now.getTime();
+          return diff > 0
+            ? { name: "⏳ Next spawn window:", value: `In ${Math.round(diff / 3_600_000)} hours` }
+            : { name: "🚨 Spawn window active:", value: "Monitoring systems for Sansha resurgence." };
+        })()
+      : { name: "⛔️ Spawn window unavailable:", value: "Awaiting last incursion telemetry data." };
 
-    if (lastIncursion != null) {
-      const nextWindowDate = lastIncursion.updatedAt + 12 * 60 * 60 * 1000;
-      const milliUntilNextWindow = nextWindowDate - now.getTime();
+    return new MessageEmbed()
+      .setAuthor({ name: "🔴 No incursion", url: "https://eve-incursions.de/", iconURL: noIncursionIconUrl })
+      .setTitle("🚧 No active Sansha incursions in monitored sectors")
+      .setDescription("CONCORD patrols report no hostile Sansha fleets in high-security space.")
+      .setColor(EmbedMessageMapper.COLOR.purple)
+      .addFields([spawnField])
+      .setFooter({ text: `Malaya Interstellar Integrated Assistant - ${EmbedMessageMapper.eveTime(now)}` });
+  }
 
-      if (milliUntilNextWindow > 0) {
-        spawnWindowField = {
-          name: "Next spawn window starts in:",
-          value: `${Math.round(milliUntilNextWindow / 1000 / 60 / 60)} hours`,
-        };
-      } else {
-        spawnWindowField = {
-          name: "Spawn window is active.",
-          value: "\u200B",
-        };
+/* ───────── main embed builder ───────── */
+  async incursionInfoToEmbedMessage(
+    { incursionInfo, createdAt, lastHeadquarterSystem }: IncursionsCacheEntry
+  ): Promise<MessageEmbed> {
+
+    /* ---------- basics ---------- */
+    const now     = new Date();
+    const created = new Date(createdAt);
+
+    const { color, emoji, label } = this.securityColor(incursionInfo.state);
+    const hqName  = incursionInfo.headquarterSystem.trim();
+    const secStat = incursionInfo.headquarterSystemSecurity ?? await getCachedSystemSecurity(hqName);
+
+    const isNull = typeof secStat === "number" && secStat <= 0.0;
+    const isHigh = typeof secStat === "number" && secStat >= 0.5;
+
+    const title = isNull
+      ? `🟥 Null-Sec Incursion Headquarter Detected: ${hqName}`
+      : isHigh
+      ? `🟩 High-Sec Incursion Headquarter Detected: ${hqName}`
+      : `⚠️ Incursion Detected: ${hqName}`;
+
+    /* ---------- helpers ---------- */
+    const stagingId = await getSystemIdByName(incursionInfo.stagingSystem);
+    const hqId      = await getSystemIdByName(hqName);
+    const dock      = await getDockUpStation(incursionInfo.constellationId, stagingId, hqId);
+
+    /* ---------- author icon: alliance logo for null-sec ---------- */
+    let authorIcon = incursionInfo.regionIconUrl || noIncursionIconUrl;
+    if (isNull) {
+      let iconCandidate = incursionInfo.allianceLogoUrl ?? null;
+      if (!iconCandidate && hqId) {
+        const sov = await getSovereigntyData(hqId);
+        if (sov?.logoUrl) iconCandidate = sov.logoUrl;
       }
-    } else {
-      spawnWindowField = {
-        name: "Next spawn window is currently not available.",
-        value: "\u200B",
-      };
+      if (iconCandidate) {
+        authorIcon = iconCandidate.replace(/(_\d+)?\.png$/, `_${LOGO_SIZE}.png`);
+      }
     }
 
-    return new MessageEmbed()
+    /* ---------- trade-hub distance ---------- */
+    type HubRoute = { name: string; jumps: number; url: string };
+    let nearestHub: HubRoute = { name: "N/A", jumps: 0, url: "" };
+
+    const HUBS = isNull ? [NULLSEC_HUB] : HIGHSEC_HUBS;
+    if (hqId) {
+      const routes: HubRoute[] = await Promise.all(
+        HUBS.map(async hub => {
+          const jumps = await getJumpsBetweenSystems(hub.systemId, hqId);
+          return {
+            name : hub.name,
+            jumps,
+            url  : `https://eve-gatecheck.space/eve/#${hub.name}:${hqName}:secure`,
+          };
+        })
+      );
+      nearestHub = routes.reduce((p, c) => (c.jumps < p.jumps ? c : p));
+    }
+
+    /* ---------- skeleton ---------- */
+    const embed = new MessageEmbed()
       .setAuthor({
-        name: `No incursion`,
-        url: `https://eve-incursions.de/`,
-        iconURL: noIncursionIconUrl,
+        name: `${emoji} ${incursionInfo.constellationName} – ${label}`,
+        url : "https://eve-incursions.de/",
+        iconURL: authorIcon,   // alliance logo in null-sec
       })
-      .setTitle(`Sansha's Nation is currently fighting outside of high-sec`)
-      .setDescription(`Actively looking for a new spawn.`)
-      .setColor(this.purpleColor)
-      .addFields([spawnWindowField])
-      .setFooter({
-        text: `Message updated on ${EmbedMessageMapper.dateToEveTimeString(
-          now
-        )}`,
-      });
-  }
+      .setTitle(title)
+      .setDescription(`Initial detection: ${EmbedMessageMapper.eveTime(created)}`)
+      .setColor(color);
 
-  incursionInfoToEmbedMessage(
-    incursionsCacheEntry: IncursionsCacheEntry
-  ): MessageEmbed {
-    const now = new Date();
-    let color: number = this.purpleColor;
+    /* ---------- core fields ---------- */
+    const fields: EmbedFieldData[] = [
+      {
+        name : "Operational Summary:",
+        value: [
+          `**Influence level:** ${Math.round(incursionInfo.influence * 100)}%`,
+          `**Island constellation:** ${incursionInfo.isIslandConstellation}`,
+          `**Last headquarter distance:** ${incursionInfo.numberOfJumpsFromLastIncursion}`,
+        ].join("\n"),
+        inline: true,
+      },
+      {
+        name : "Constellation Layout:",
+        value: [
+          `**Headquarter:** ${incursionInfo.headquarterSystem}`,
+          `**Staging:** ${incursionInfo.stagingSystem}`,
+          `**Vanguards:** ${incursionInfo.vanguardSystems.join(", ")}`,
+          `**Assaults:** ${incursionInfo.assaultSystems.join(", ")}`,
+        ].join("\n"),
+        inline: true,
+      },
+    ];
 
-    const { incursionInfo, createdAt } = incursionsCacheEntry;
-
-    if (incursionInfo.state === ESIIncursionState.ESTABLISHED.toString()) {
-      color = this.greenColor;
-    } else if (
-      incursionInfo.state === ESIIncursionState.MOBILIZING.toString()
-    ) {
-      color = this.yellowColor;
-    } else if (
-      incursionInfo.state === ESIIncursionState.WITHDRAWING.toString()
-    ) {
-      color = this.redColor;
+    /* ---------- Sovereignty block (null-sec) ---------- */
+    if (isNull) {
+      if (incursionInfo.allianceName && incursionInfo.allianceTicker) {
+        fields.push({
+          name : "<:Alliances:1387750819163803790> Sovereignty:",
+          value: `${incursionInfo.allianceName} [${incursionInfo.allianceTicker}]`,
+        });
+      } else if (hqId) {
+        const sov = await getSovereigntyData(hqId);
+        fields.push({
+          name : "<:Alliances:1387750819163803790> Sovereignty:",
+          value: sov ? `${sov.allianceName} [${sov.allianceTicker}]` : "*Unknown alliance control*",
+        });
+      }
     }
 
-    const createAtDate = new Date(createdAt);
-    let lastIncursionDistanceMessage = "N/A";
-
-    if (incursionInfo.numberOfJumpsFromLastIncursion !== "N/A") {
-      lastIncursionDistanceMessage = `${incursionInfo.numberOfJumpsFromLastIncursion} jumps from ${incursionInfo.lastIncursionSystemName}`;
+    /* ---------- Edencom / Trig route scan (always present) ---------- */
+    let edenRoute = "None";
+    let trigRoute = "None";
+    if (lastHeadquarterSystem && hqName !== lastHeadquarterSystem) {
+      const scan = await getTrigEdencomSystemsInRoute(lastHeadquarterSystem, hqName);
+      if (scan.edencom.length)    edenRoute = scan.edencom.join(", ");
+      if (scan.triglavian.length) trigRoute = scan.triglavian.join(", ");
     }
 
-    return new MessageEmbed()
-      .setAuthor({
-        name: `${incursionInfo.constellationName}`,
-        url: `https://eve-incursions.de/`,
-        iconURL: `${incursionInfo.regionIconUrl}`,
-      })
-      .setTitle(
-        `${incursionInfo.constellationName} is now in ${incursionInfo.state} state`
-      )
-      .setDescription(
-        `Detected on ${EmbedMessageMapper.dateToEveTimeString(createAtDate)}`
-      )
-      .setColor(color)
-      .addFields([
-        {
-          name: "Incursion information:",
-          value: `**Distance from last incursion:** ${lastIncursionDistanceMessage}\n**Influence level:** ${Math.round(
-            incursionInfo.influence * 100
-          )}%\n**Island constellation:** ${
-            incursionInfo.isIslandConstellation
-          }`,
-          inline: true,
-        },
-        {
-          name: `Constellation layout:`,
-          value: `**Headquarter:** ${
-            incursionInfo.headquarterSystem
-          }\n**Staging:** ${
-            incursionInfo.stagingSystem
-          }\n**Vanguards:** ${incursionInfo.vanguardSystems.join(
-            ", "
-          )}\n**Assaults:** ${incursionInfo.assaultSystems.join(", ")}`,
-          inline: true,
-        },
-      ])
-      .setFooter({
-        text: `Message updated on ${EmbedMessageMapper.dateToEveTimeString(
-          now
-        )}`,
+    fields.push(
+      { name: "<:ecom:1387758833853534240> Edencom In Route:",           value: edenRoute },
+      { name: "<:triglavian_coll:1387750631439204474> Triglavian In Route:", value: trigRoute },
+    );
+
+    /* ---------- Fleet info (high-sec only) ---------- */
+    if (isHigh) {
+      fields.push({
+        name : "<:Fleet:1387787010311327895> Fleet Info:",
+        value: "WTM Fleet: [Waitlist](https://wl.warptome.net/)  | " +
+               "TLA Fleet: [Waitlist](https://wl.tlaincursions.com/waitlist?wl=1) ",
       });
-  }
+    }
 
-  private static dateToEveTimeString(date: Date): string {
-    const locale: Intl.LocalesArgument = "en-US";
-    const options: Intl.NumberFormatOptions = { minimumIntegerDigits: 2 };
-    const year = date.getUTCFullYear();
-    const month = (date.getUTCMonth() + 1).toLocaleString(locale, options);
-    const day = date.getUTCDate().toLocaleString(locale, options);
-    const hours = date.getUTCHours().toLocaleString(locale, options);
-    const minutes = date.getUTCMinutes().toLocaleString(locale, options);
+    /* ---------- misc / footer ---------- */
+    fields.push(
+      { name: "<:sansha:1387786770535415932> Kundalini Manifest Timer:", value: this.buildKundaliniTimer(created, now) },
+      { name: "<:concord:1387786922134601822> Dock-up:",                   value: dock ? dock.name : "*No recommended station found.*" },
+      {
+        name : "<:const:1387783210112516166> Nearest Trade-Hub:",
+        value: nearestHub.jumps
+          ? `Route from ${nearestHub.name}: [${nearestHub.jumps} jumps](${nearestHub.url})`
+          : "N/A",
+      },
+    );
 
-    return `${year}-${month}-${day} at ${hours}:${minutes} EVE Time`;
+    embed.addFields(fields);
+    embed.setFooter({
+      text: `Malaya Interstellar Integrated Assistant - ${EmbedMessageMapper.eveTime(now)}`
+    });
+
+    return embed;
   }
 }
-
-export default EmbedMessageMapper;

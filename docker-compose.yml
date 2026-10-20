@@ -1,0 +1,10 @@
+services:
+  incursion-bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: milia-incursion-assistant
+    restart: unless-stopped
+    volumes:
+      - ./config.json:/app/src/config/config.json
+      - ./incursions_cache.json:/app/incursions_cache.json

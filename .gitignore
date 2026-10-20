@@ -4,3 +4,10 @@ src/config/config.json
 .idea
 incursions_cache.json
 !example/incursions_cache.json
+
+# The bot's live settings, with its Discord token (example/config.json is the template)
+/config.json
+# Manual backups and copies: git history keeps every version
+*backup*
+*BackUp*
+*.bak*

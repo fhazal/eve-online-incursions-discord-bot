@@ -1,154 +1,155 @@
-import { writeFileSync, readFileSync } from "fs";
+// src/services/IncursionsCacheService.ts
+/* eslint-disable no-console */
+import { readFileSync, writeFileSync } from "fs";
+
 import IncursionsCacheEntry from "../models/bot/IncursionsCacheEntry";
-import IncursionsCache from "../models/bot/IncursionsCache";
+import IncursionsCache      from "../models/bot/IncursionsCache";
+
+const CACHE_PATH = "incursions_cache.json";
 
 class IncursionsCacheService {
-  private readonly incursionCacheFilePath: string = "incursions_cache.json";
+  /* ------------------------------------------------------------------ */
+  /*  In-memory copy of the JSON cache                                  */
+  /* ------------------------------------------------------------------ */
+  private incursionsCache: IncursionsCache = {
+    noIncursionMessageId : null,
+    lastHighSecIncursion : null,
+    lastNullSecIncursion : null,
+    currentIncursions    : [],
+  };
 
-  private readonly incursionsCache: IncursionsCache;
-
+  /* ------------------------------------------------------------------ */
+  /*  ctor – try to load previous cache from disk                       */
+  /* ------------------------------------------------------------------ */
   constructor() {
-    this.incursionsCache = {
-      noIncursionMessageId: null,
-      lastIncursion: null,
-      currentIncursions: [],
-    };
-
     try {
-      const data = readFileSync(this.incursionCacheFilePath, "utf8");
-      this.incursionsCache = JSON.parse(data);
-    } catch (err) {
-      console.log(err);
+      const raw = readFileSync(CACHE_PATH, "utf8");
+      const parsed = JSON.parse(raw) as Partial<IncursionsCache>;
+
+      /* ── migrate legacy single-bucket files on the fly ──────────── */
+      if ((parsed as any).lastIncursion && !parsed.lastHighSecIncursion) {
+        const legacy = (parsed as any).lastIncursion as IncursionsCacheEntry;
+        if ((legacy.incursionInfo.headquarterSystemSecurity ?? 0.5) >= 0.5) {
+          parsed.lastHighSecIncursion = legacy;
+        } else {
+          parsed.lastNullSecIncursion = legacy;
+        }
+        delete (parsed as any).lastIncursion;
+      }
+
+      this.incursionsCache = {
+        noIncursionMessageId : parsed.noIncursionMessageId ?? null,
+        lastHighSecIncursion : parsed.lastHighSecIncursion ?? null,
+        lastNullSecIncursion : parsed.lastNullSecIncursion ?? null,
+        currentIncursions    : parsed.currentIncursions    ?? [],
+      };
+    } catch {
+      console.warn("⚠️  No previous incursion cache found – starting fresh.");
     }
   }
 
+  /* ------------------------------------------------------------------ */
+  /*  Simple getters                                                    */
+  /* ------------------------------------------------------------------ */
   findNoIncursionMessageId(): string | null {
     return this.incursionsCache.noIncursionMessageId;
   }
 
-  findLastIncursion(): IncursionsCacheEntry | null {
-    return this.incursionsCache.lastIncursion;
+  /**
+   * Return the *last despawned* HQ for the requested security band.
+   * @param isNull  true → null-sec   |   false → high-sec
+   */
+  findLastIncursion(isNull: boolean): IncursionsCacheEntry | null {
+    return isNull
+      ? this.incursionsCache.lastNullSecIncursion
+      : this.incursionsCache.lastHighSecIncursion;
   }
 
   findCurrentIncursions(): IncursionsCacheEntry[] {
     return this.incursionsCache.currentIncursions;
   }
 
-  findCurrentIncursionByConstellationId(
-    constellationId: number
-  ): IncursionsCacheEntry | null {
-    const currentIncursion: IncursionsCacheEntry | undefined =
-      this.incursionsCache.currentIncursions.find(
-        (incursionCacheEntry) =>
-          incursionCacheEntry.incursionInfo.constellationId === constellationId
-      );
-
-    if (currentIncursion === undefined) {
-      return null;
-    }
-
-    return currentIncursion;
-  }
-
-  replaceAndUpdateCurrentIncursions(
-    newCurrentIncursions: IncursionsCacheEntry[]
-  ) {
-    const updatedCurrentIncursions: IncursionsCacheEntry[] = [];
-
-    this.incursionsCache.currentIncursions.forEach((cachedCurrentIncursion) => {
-      const isOldIncursion: boolean =
-        newCurrentIncursions.findIndex(
-          (newIncursion) =>
-            newIncursion.incursionInfo.constellationId ===
-            cachedCurrentIncursion.incursionInfo.constellationId
-        ) === -1;
-      if (!isOldIncursion) {
-        updatedCurrentIncursions.push({ ...cachedCurrentIncursion });
-      }
-    });
-
-    newCurrentIncursions.forEach((incursionCacheEntry) => {
-      const index = updatedCurrentIncursions.findIndex(
-        (cachedCurrentIncursion) =>
-          cachedCurrentIncursion.incursionInfo.constellationId ===
-          incursionCacheEntry.incursionInfo.constellationId
-      );
-
-      if (index === -1) {
-        updatedCurrentIncursions.push(incursionCacheEntry);
-      } else {
-        updatedCurrentIncursions[index] = incursionCacheEntry;
-      }
-    });
-
-    this.saveCurrentIncursions(updatedCurrentIncursions);
-  }
-
-  constellationIsInCurrentIncursions(constellationId: number): boolean {
+  findCurrentIncursionByConstellationId(id: number): IncursionsCacheEntry | null {
     return (
       this.incursionsCache.currentIncursions.find(
-        (incursionCacheEntry) =>
-          incursionCacheEntry.incursionInfo.constellationId === constellationId
-      ) !== undefined
+        e => e.incursionInfo.constellationId === id
+      ) ?? null
     );
   }
 
-  checkAndRotateCurrentIncursions(
-    newCurrentIncursions: IncursionsCacheEntry[]
-  ) {
-    const newPotentialLastIncursion: IncursionsCacheEntry[] = [];
+  /* ------------------------------------------------------------------ */
+  /*  Main rotation routine – call after every ESI refresh              */
+  /* ------------------------------------------------------------------ */
+  checkAndRotateCurrentIncursions(newIncursions: IncursionsCacheEntry[]) {
+    /* ▲ 1) detect despawns ------------------------------------------ */
+    const rotatedOut: IncursionsCacheEntry[] = [];
 
-    this.incursionsCache.currentIncursions.forEach((cachedCurrentIncursion) => {
-      const index = newCurrentIncursions.findIndex(
-        (currentIncursion) =>
-          currentIncursion.incursionInfo.constellationId ===
-          cachedCurrentIncursion.incursionInfo.constellationId
-      );
-
-      if (index === -1) {
-        newPotentialLastIncursion.push(cachedCurrentIncursion);
+    for (const cached of this.incursionsCache.currentIncursions) {
+      if (
+        !newIncursions.find(
+          n => n.incursionInfo.constellationId === cached.incursionInfo.constellationId
+        )
+      ) {
+        rotatedOut.push(cached);
       }
-    });
-
-    if (newPotentialLastIncursion.length > 0) {
-      newPotentialLastIncursion.sort((a, b) => b.createdAt - a.createdAt);
-      newPotentialLastIncursion[0].updatedAt = Date.now();
-      this.saveLastIncursion(newPotentialLastIncursion[0]);
     }
 
-    this.replaceAndUpdateCurrentIncursions(newCurrentIncursions);
+    /* ▲ 2) store newest despawn per security band ------------------- */
+    if (rotatedOut.length) {
+      rotatedOut.sort((a, b) => b.createdAt - a.createdAt);       // newest first
+      const latest = rotatedOut[0];
+      latest.updatedAt = Date.now();
+
+      const isNull = (latest.incursionInfo.headquarterSystemSecurity ?? 0) <= 0;
+      if (isNull) {
+        this.incursionsCache.lastNullSecIncursion = latest;
+      } else {
+        this.incursionsCache.lastHighSecIncursion = latest;
+      }
+    }
+
+    /* ▲ 3) remember previous HQ name for Edencom / Trig route scan -- */
+    const lastHigh = this.incursionsCache.lastHighSecIncursion?.incursionInfo.headquarterSystem;
+    const lastNull = this.incursionsCache.lastNullSecIncursion?.incursionInfo.headquarterSystem;
+
+    const patched = newIncursions.map(e => {
+      const isNull = (e.incursionInfo.headquarterSystemSecurity ?? 0) <= 0;
+      return {
+        ...e,
+        lastHeadquarterSystem: isNull ? lastNull : lastHigh,
+      };
+    });
+
+    /* ▲ 4) persist new “current” list ------------------------------- */
+    this.incursionsCache.currentIncursions = patched;
+    this.saveCacheToDisk();
   }
 
-  clearNoIncursionMessageId() {
+  /* ------------------------------------------------------------------ */
+  /*  Misc helpers                                                      */
+  /* ------------------------------------------------------------------ */
+  clearNoIncursionMessageId(): void {
     this.incursionsCache.noIncursionMessageId = null;
-    this.saveCacheToFile();
+    this.saveCacheToDisk();
   }
 
-  saveNoIncursionMessageId(noIncursionMessageId: string) {
-    this.incursionsCache.noIncursionMessageId = noIncursionMessageId;
-    this.saveCacheToFile();
+  saveNoIncursionMessageId(id: string): void {
+    this.incursionsCache.noIncursionMessageId = id;
+    this.saveCacheToDisk();
   }
 
-  private saveCurrentIncursions(incursionsCacheEntry: IncursionsCacheEntry[]) {
-    this.incursionsCache.currentIncursions = incursionsCacheEntry;
-    this.saveCacheToFile();
-  }
-
-  private saveLastIncursion(incursionsCacheEntry: IncursionsCacheEntry) {
-    this.incursionsCache.lastIncursion = incursionsCacheEntry;
-    this.saveCacheToFile();
-  }
-
-  private saveCacheToFile() {
+  /* ------------------------------------------------------------------ */
+  /*  Disk I/O                                                          */
+  /* ------------------------------------------------------------------ */
+  private saveCacheToDisk(): void {
     try {
       writeFileSync(
-        this.incursionCacheFilePath,
-        JSON.stringify(this.incursionsCache, null, 4),
+        CACHE_PATH,
+        JSON.stringify(this.incursionsCache, null, 2),
         "utf8"
       );
     } catch (err) {
-      console.log("An error occured while writing JSON Object to File.");
-      console.log(err);
+      console.error("❌ Failed to write incursion cache:", err);
     }
   }
 }

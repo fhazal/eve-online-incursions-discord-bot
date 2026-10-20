@@ -1,44 +1,45 @@
+// src/services/IncursionInfoService.ts
+// ────────────────────────────────────────────────
+// Builds fully-enriched IncursionInfo objects
+// ────────────────────────────────────────────────
 import ESISystem from "../models/esi/ESISystem";
 import ESIConstellation from "../models/esi/ESIConstellation";
-import ESIService from "./ESIService";
-import { highSecOnly } from "../config/config.json";
-import IncursionConstellationLayout from "../models/bot/IncursionConstellationLayout";
-import IncursionInfo from "../models/bot/IncursionInfo";
 import ESIIncursion from "../models/esi/ESIIncursion";
+import ESIService from "./ESIService";
 import RegionIconService from "./RegionIconService";
 import IncursionLayoutService from "./IncursionLayoutService";
+import SovereigntyService from "./SovereigntyService";
+
+import IncursionConstellationLayout from "../models/bot/IncursionConstellationLayout";
+import IncursionInfo from "../models/bot/IncursionInfo";
 import ESIResponse from "../models/esi/ESIResponse";
 
+import { highSecOnly } from "../config/config.json";
+
 class IncursionInfoService {
+  /* ────────── injected helpers ────────── */
   private readonly esiService: ESIService;
-
   private readonly regionIconService: RegionIconService;
-
   private readonly incursionLayoutService: IncursionLayoutService;
 
-  private readonly esiSystemInfoByIdDict: { [systemId: number]: ESISystem };
+  /* ────────── local caches ────────── */
+  private readonly esiSystemById: Record<number, ESISystem> = {};
+  private readonly esiSystemByName: Record<string, ESISystem> = {};
+  private readonly esiConstById: Record<number, ESIConstellation> = {};
 
-  private readonly esiSystemInfoByNameDict: { [systemName: string]: ESISystem };
-
-  private readonly esiConstellationInfoDict: {
-    [constellationId: number]: ESIConstellation;
-  };
-
-  private esiIncursionCacheExpireDate: Date;
+  private esiIncursionCacheExpireDate: Date = new Date();
 
   constructor(
-    _esiService: ESIService,
-    _regionIconService: RegionIconService,
-    _incursionLayoutService: IncursionLayoutService
+    esiService: ESIService,
+    regionIconService: RegionIconService,
+    incursionLayoutService: IncursionLayoutService
   ) {
-    this.esiService = _esiService;
-    this.regionIconService = _regionIconService;
-    this.incursionLayoutService = _incursionLayoutService;
-    this.esiSystemInfoByIdDict = {};
-    this.esiSystemInfoByNameDict = {};
-    this.esiConstellationInfoDict = {};
-    this.esiIncursionCacheExpireDate = new Date();
+    this.esiService = esiService;
+    this.regionIconService = regionIconService;
+    this.incursionLayoutService = incursionLayoutService;
   }
+
+  /* ───────────── PUBLIC API ───────────── */
 
   async findAllIncursionsInfo(
     lastIncursionInfo: IncursionInfo | null
@@ -46,187 +47,180 @@ class IncursionInfoService {
     const esiResponse: ESIResponse<ESIIncursion[]> | null =
       await this.esiService.getIncursionsInfo();
 
-    if (esiResponse == null) {
-      this.esiIncursionCacheExpireDate = new Date(Date.now() + 60 * 1000);
+    if (!esiResponse) {
+      this.esiIncursionCacheExpireDate = new Date(Date.now() + 60_000);
       return null;
     }
 
-    const esiIncursionInfos: ESIIncursion[] = esiResponse.data;
+    const esiIncursions = esiResponse.data;
     this.esiIncursionCacheExpireDate = new Date(esiResponse.headers.expires);
 
-    await this.prepareIncursionsData(esiIncursionInfos);
+    await this.preloadBulkData(esiIncursions);
 
-    const incursionInfos: IncursionInfo[] = [];
-    const promiseList: Promise<void>[] = [];
+    const enriched: IncursionInfo[] = [];
+    await Promise.all(
+      esiIncursions.map(async (raw) => {
+        const info = await this.buildIncursionInfo(raw, lastIncursionInfo);
+        if (info) enriched.push(info);
+      })
+    );
 
-    esiIncursionInfos.forEach((esiIncursion) => {
-      promiseList.push(
-        this.findCompletedIncursionInfo(esiIncursion, lastIncursionInfo).then(
-          (incursionInfo) => {
-            if (incursionInfo != null) {
-              incursionInfos.push(incursionInfo);
-            }
-          }
-        )
-      );
-    });
-
-    await Promise.all(promiseList);
-
-    return incursionInfos;
+    return enriched;
   }
 
   getEsiIncursionCacheExpireDate(): Date {
     return this.esiIncursionCacheExpireDate;
   }
 
-  async prepareIncursionsData(esiIncursionInfos: ESIIncursion[]) {
-    const promiseList: Promise<void>[] = [];
+  /* ───────────── INTERNALS ───────────── */
 
-    esiIncursionInfos.forEach((esiIncursion) => {
-      promiseList.push(
+  private async preloadBulkData(incursions: ESIIncursion[]) {
+    const jobs: Promise<void>[] = [];
+
+    for (const inc of incursions) {
+      jobs.push(
         this.esiService
-          .getConstellationInfo(esiIncursion.constellation_id)
-          .then((esiResponse) => {
-            if (esiResponse != null) {
-              const esiConstellation = esiResponse.data;
-
-              this.esiConstellationInfoDict[esiConstellation.constellation_id] =
-                esiConstellation;
-            }
+          .getConstellationInfo(inc.constellation_id)
+          .then((res) => {
+            if (res) this.esiConstById[res.data.constellation_id] = res.data;
           })
       );
 
-      promiseList.push(
-        this.esiService
-          .getSystemInfo(esiIncursion.staging_solar_system_id)
-          .then((esiResponse) => {
-            if (esiResponse != null) {
-              const esiSystem = esiResponse.data;
-
-              this.esiSystemInfoByIdDict[esiSystem.system_id] = esiSystem;
-              this.esiSystemInfoByNameDict[esiSystem.name] = esiSystem;
-            }
-          })
-      );
-
-      esiIncursion.infested_solar_systems.forEach((infestedSolarSystem) => {
-        promiseList.push(
-          this.esiService
-            .getSystemInfo(infestedSolarSystem)
-            .then((esiResponse) => {
-              if (esiResponse != null) {
-                const esiSystem = esiResponse.data;
-
-                this.esiSystemInfoByIdDict[esiSystem.system_id] = esiSystem;
-                this.esiSystemInfoByNameDict[esiSystem.name] = esiSystem;
-              }
-            })
-        );
-      });
-    });
-
-    await Promise.all(promiseList);
-  }
-
-  private async findCompletedIncursionInfo(
-    esiIncursion: ESIIncursion,
-    lastIncursionInfo: IncursionInfo | null
-  ): Promise<IncursionInfo | null> {
-    const constellationInfo: ESIConstellation | undefined =
-      this.esiConstellationInfoDict[esiIncursion.constellation_id];
-    const stagingSolarSystemInfo: ESISystem | undefined =
-      this.esiSystemInfoByIdDict[esiIncursion.staging_solar_system_id];
-    const infestedSolarSystems: string[] = [];
-
-    esiIncursion.infested_solar_systems.forEach((infestedSolarSystemId) => {
-      const infestedSolarSystemInfo: ESISystem | undefined =
-        this.esiSystemInfoByIdDict[infestedSolarSystemId];
-
-      if (infestedSolarSystemInfo !== undefined) {
-        infestedSolarSystems.push(infestedSolarSystemInfo.name);
-      }
-    });
-
-    if (
-      constellationInfo === undefined ||
-      stagingSolarSystemInfo === undefined ||
-      infestedSolarSystems.length !== esiIncursion.infested_solar_systems.length
-    ) {
-      console.error(
-        `Missing information for incursion: ${JSON.stringify(esiIncursion)}`
-      );
-    } else if (
-      !highSecOnly ||
-      (highSecOnly && stagingSolarSystemInfo.security_status >= 0.45)
-    ) {
-      let regionIconUrl = this.regionIconService.findRegionIconUrl(
-        constellationInfo.region_id
-      );
-      const incursionConstellationLayout: IncursionConstellationLayout | null =
-        this.incursionLayoutService.findIncursionLayout(constellationInfo.name);
-
-      if (regionIconUrl == null) {
-        regionIconUrl = "";
-      }
-
-      let stagingSystem = "N/A";
-      let headquarterSystem = "N/A";
-      let headquarterSystemId: number | null = null;
-      let vanguardSystems = ["N/A"];
-      let assaultSystems = ["N/A"];
-      let isIslandConstellation = "N/A";
-      let numberOfJumpsFromLastIncursion = "N/A";
-      let lastIncursionSystemName = "N/A";
-
-      if (incursionConstellationLayout != null) {
-        stagingSystem = incursionConstellationLayout.staging_system;
-        headquarterSystem = incursionConstellationLayout.headquarter_system;
-        headquarterSystemId =
-          this.esiSystemInfoByNameDict[
-            incursionConstellationLayout.headquarter_system
-          ].system_id;
-        vanguardSystems = incursionConstellationLayout.vanguard_systems;
-        assaultSystems = incursionConstellationLayout.assault_systems;
-        isIslandConstellation =
-          incursionConstellationLayout.is_island_constellation ? "Yes" : "No";
-
-        if (lastIncursionInfo != null) {
-          if (lastIncursionInfo.headquarterSystemId != null) {
-            const esiResponse = await this.esiService.getRouteInfo(
-              lastIncursionInfo.headquarterSystemId,
-              headquarterSystemId
-            );
-
-            if (esiResponse != null) {
-              const route = esiResponse.data;
-
-              numberOfJumpsFromLastIncursion = (route.length - 1).toString();
-            }
+      jobs.push(
+        this.esiService.getSystemInfo(inc.staging_solar_system_id).then((res) => {
+          if (res) {
+            this.esiSystemById[res.data.system_id] = res.data;
+            this.esiSystemByName[res.data.name] = res.data;
           }
+        })
+      );
 
-          lastIncursionSystemName = lastIncursionInfo.headquarterSystem;
-        }
+      for (const sysId of inc.infested_solar_systems) {
+        jobs.push(
+          this.esiService.getSystemInfo(sysId).then((res) => {
+            if (res) {
+              this.esiSystemById[res.data.system_id] = res.data;
+              this.esiSystemByName[res.data.name] = res.data;
+            }
+          })
+        );
       }
-
-      return {
-        regionIconUrl,
-        constellationName: constellationInfo.name,
-        constellationId: esiIncursion.constellation_id,
-        headquarterSystem,
-        headquarterSystemId,
-        stagingSystem,
-        vanguardSystems,
-        assaultSystems,
-        numberOfJumpsFromLastIncursion,
-        influence: 1 - esiIncursion.influence,
-        state: esiIncursion.state,
-        isIslandConstellation,
-        lastIncursionSystemName,
-      };
     }
 
-    return null;
+    await Promise.all(jobs);
+  }
+
+  private async buildIncursionInfo(
+    inc: ESIIncursion,
+    lastIncursion: IncursionInfo | null
+  ): Promise<IncursionInfo | null> {
+    const constellation = this.esiConstById[inc.constellation_id];
+    const stagingSys = this.esiSystemById[inc.staging_solar_system_id];
+    if (!constellation || !stagingSys) return null;
+
+    if (highSecOnly && stagingSys.security_status < 0.45) return null;
+
+    const regionIconUrl =
+      this.regionIconService.findRegionIconUrl(constellation.region_id) ?? "";
+
+    let stagingSystem = stagingSys.name;
+    let headquarterSystem = stagingSys.name;
+    let headquarterSystemId: number | null = stagingSys.system_id;
+    let headquarterSec: number | null = stagingSys.security_status;
+    let vanguardSystems: string[] = ["N/A"];
+    let assaultSystems: string[] = ["N/A"];
+    let isIslandConstellation: "Yes" | "No" | "N/A" = "N/A";
+
+    const layout: IncursionConstellationLayout | null =
+      this.incursionLayoutService.findIncursionLayout(constellation.name);
+
+    if (layout) {
+      stagingSystem = layout.staging_system;
+      headquarterSystem = layout.headquarter_system;
+      headquarterSystemId =
+        this.esiSystemByName[headquarterSystem]?.system_id ?? null;
+      headquarterSec =
+        this.esiSystemByName[headquarterSystem]?.security_status ?? null;
+      vanguardSystems = layout.vanguard_systems;
+      assaultSystems = layout.assault_systems;
+      isIslandConstellation = layout.is_island_constellation ? "Yes" : "No";
+    }
+
+    let lastIncursionSystemName = "N/A";
+    let numberOfJumpsFromLastIncursion = -1;
+
+    if (lastIncursion?.headquarterSystemId && headquarterSystemId) {
+      const routeRes = await this.esiService.getRouteInfo(
+        lastIncursion.headquarterSystemId,
+        headquarterSystemId
+      );
+      if (routeRes) numberOfJumpsFromLastIncursion = routeRes.data.length - 1;
+      lastIncursionSystemName = lastIncursion.headquarterSystem;
+    }
+
+    const sov = await SovereigntyService.getSovForSystem(headquarterSystemId);
+
+    return {
+      constellationName: constellation.name,
+      constellationId: constellation.constellation_id,
+      regionId: constellation.region_id,
+
+      headquarterSystem,
+      headquarterSystemId,
+      headquarterSystemSecurity: headquarterSec,
+
+      stagingSystem,
+      vanguardSystems,
+      assaultSystems,
+
+      influence: 1 - inc.influence,
+      state: inc.state,
+
+      numberOfJumpsFromLastIncursion,
+      lastIncursionSystemName,
+
+      regionIconUrl,
+      isIslandConstellation,
+
+      allianceId: sov?.allianceId ?? null,
+      allianceName: sov?.allianceName ?? null,
+      allianceTicker: sov?.allianceTicker ?? null,
+      allianceLogoUrl: sov?.logoUrl ?? null,
+    };
+  }
+
+  /* ───────────────────────────────────────────────
+   * Public helper: re-evaluate distance vs supplied
+   * “last HQ” (high-sec or null-sec bucket).
+   * ─────────────────────────────────────────────── */
+  async buildIncursionInfoFromBase(
+    info: IncursionInfo,
+    lastIncursion: IncursionInfo | null
+  ): Promise<IncursionInfo> {
+    if (
+      !lastIncursion?.headquarterSystemId ||
+      !info.headquarterSystemId ||
+      lastIncursion.headquarterSystemId === info.headquarterSystemId
+    ) {
+      return { ...info };
+    }
+
+    let jumps = -1;
+    try {
+      const route = await this.esiService.getRouteInfo(
+        lastIncursion.headquarterSystemId,
+        info.headquarterSystemId
+      );
+      if (route) jumps = route.data.length - 1;
+    } catch {
+      /* ignore – keep -1 */
+    }
+
+    return {
+      ...info,
+      numberOfJumpsFromLastIncursion: jumps,
+      lastIncursionSystemName: jumps >= 0 ? lastIncursion.headquarterSystem : "N/A",
+    };
   }
 }
 
