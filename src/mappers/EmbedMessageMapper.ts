@@ -12,6 +12,7 @@
 
 import { EmbedFieldData, MessageEmbed } from "discord.js";
 import { MILIA_NAME } from "../version";
+import { EMOJI, SPACER_FIELD } from "../emojis";
 
 import ESIIncursionState      from "../models/esi/ESIIncursionState";
 import IncursionsCacheEntry   from "../models/bot/IncursionsCacheEntry";
@@ -171,7 +172,7 @@ export default class EmbedMessageMapper {
     /* ---------- core fields ---------- */
     const fields: EmbedFieldData[] = [
       {
-        name : "Operational Summary:",
+        name : `${EMOJI.warReport} Operational Summary:`,
         value: [
           `**Influence level:** ${Math.round(incursionInfo.influence * 100)}%`,
           `**Island constellation:** ${incursionInfo.isIslandConstellation}`,
@@ -179,8 +180,9 @@ export default class EmbedMessageMapper {
         ].join("\n"),
         inline: true,
       },
+      SPACER_FIELD, // a gap between the two side-by-side blocks
       {
-        name : "Constellation Layout:",
+        name : `${EMOJI.constellationMap} Constellation Layout:`,
         value: [
           `**Headquarter:** ${incursionInfo.headquarterSystem}`,
           `**Staging:** ${incursionInfo.stagingSystem}`,

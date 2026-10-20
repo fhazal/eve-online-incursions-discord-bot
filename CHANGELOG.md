@@ -2,6 +2,12 @@
 
 M.I.L.I.A. (Malaya Interstellar Integrated Assistant), the EVE Online incursions bot by BajuBesi Labs. The version is in the footer of every card: new features raise the middle number (1.1.0), fixes only the last (1.0.1). Releases are tagged `milia-v<version>`; the plain `v1.0.x` tags belong to the original bot.
 
+## 1.1.0 · 21 October 2026
+
+- **Icons on the card's first two blocks:** *Operational Summary* gets a war-report icon and *Constellation Layout* a constellation-map icon, EVE interface icons from [PhobiaCide/eve-icons](https://github.com/PhobiaCide/eve-icons). They are M.I.L.I.A.'s own app emojis, so they show on every server the bot is in.
+- **More room between them:** the two blocks no longer sit right against each other on PC (phones show them one under the other, as before).
+- Same on the Ether, small-alliance and big-alliance layouts.
+
 ## 1.0.0 · 21 October 2026
 
 The first numbered release of M.I.L.I.A., built on [Olivier Pelletier's eve-online-incursions-discord-bot](https://github.com/OlivierPelletier/eve-online-incursions-discord-bot) 1.0.3. Everything below is new compared to the original.

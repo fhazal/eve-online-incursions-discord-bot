@@ -1,6 +1,6 @@
 {
   "name": "milia-incursion-bot",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "M.I.L.I.A. (Malaya Interstellar Integrated Assistant): an EVE Online incursions bot for Discord, based on Olivier Pelletier's eve-online-incursions-discord-bot.",
   "repository": "https://github.com/OlivierPelletier/eve-online-incursion-discord-bot",
   "author": "Olivier Pelletier",

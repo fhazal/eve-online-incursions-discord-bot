@@ -5,7 +5,7 @@
 **Malaya Interstellar Integrated Assistant: an EVE Online incursions bot for Discord.**<br>
 Live incursion cards for high-sec and null-sec, with route intel, spawn windows and dock-up advice.
 
-[![Version 1.0.0](https://img.shields.io/badge/M.I.L.I.A.-v1.0.0-8b5cf6)](CHANGELOG.md)
+[![Version 1.1.0](https://img.shields.io/badge/M.I.L.I.A.-v1.1.0-8b5cf6)](CHANGELOG.md)
 ![TypeScript](https://img.shields.io/badge/TypeScript-4.7-3178c6?logo=typescript&logoColor=white)
 ![discord.js 13](https://img.shields.io/badge/discord.js-13-5865f2?logo=discord&logoColor=white)
 ![Docker](https://img.shields.io/badge/docker-compose-2496ed?logo=docker&logoColor=white)
